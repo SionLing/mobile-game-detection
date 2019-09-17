@@ -47,6 +47,7 @@ def DarknetConv(x, filters, size, strides=1, batch_norm=True):
     return x
 
 
+# 卷积的残差算法，目的是避免卷积结果过于偏离原数据
 def DarknetResidual(x, filters):
     prev = x
     x = DarknetConv(x, filters // 2, 1)
@@ -55,6 +56,7 @@ def DarknetResidual(x, filters):
     return x
 
 
+# change x from shape [N, N, C] to [N/2, N/2, Filters], blocks is residual times
 def DarknetBlock(x, filters, blocks):
     x = DarknetConv(x, filters, 3, strides=2)
     for _ in range(blocks):
@@ -62,14 +64,15 @@ def DarknetBlock(x, filters, blocks):
     return x
 
 
+# [N, N, 3] => ([N/8, N/8, 256], [N/16, N/16, 512], [N/32, N/32, 1024])
 def Darknet(name=None):
     x = inputs = Input([None, None, 3])
-    x = DarknetConv(x, 32, 3)
-    x = DarknetBlock(x, 64, 1)
-    x = DarknetBlock(x, 128, 2)  # skip connection
-    x = x_36 = DarknetBlock(x, 256, 8)  # skip connection
-    x = x_61 = DarknetBlock(x, 512, 8)
-    x = DarknetBlock(x, 1024, 4)
+    x = DarknetConv(x, 32, 3)   # [N, N, 3] => [N, N, 32]
+    x = DarknetBlock(x, 64, 1)  # [N, N, 32] => [N/2, N/2, 64]
+    x = DarknetBlock(x, 128, 2)  # [N/2, N/2, 64] => [N/4, N/4, 128]
+    x = x_36 = DarknetBlock(x, 256, 8)  # [N/4, N/4, 128] => [N/8, N/8, 256]
+    x = x_61 = DarknetBlock(x, 512, 8)  # [N/8, N/8, 256] => [N/16, N/16, 512]
+    x = DarknetBlock(x, 1024, 4)    # [N/16, N/16, 512] => [N/32, N/32, 1024]
     return tf.keras.Model(inputs, (x_36, x_61, x), name=name)
 
 
@@ -91,6 +94,7 @@ def DarknetTiny(name=None):
     return tf.keras.Model(inputs, (x_8, x), name=name)
 
 
+# only change the channel count
 def YoloConv(filters, name=None):
     def yolo_conv(x_in):
         if isinstance(x_in, tuple):
@@ -131,6 +135,7 @@ def YoloConvTiny(filters, name=None):
     return yolo_conv
 
 
+# 将tensor卷积成[batch,h,w,anchors*(classes+5)]，然后reshape成[batch,h,w,anchors,classes+5]
 def YoloOutput(filters, anchors, classes, name=None):
     def yolo_output(x_in):
         x = inputs = Input(x_in.shape[1:])
@@ -144,18 +149,22 @@ def YoloOutput(filters, anchors, classes, name=None):
 
 def yolo_boxes(pred, anchors, classes):
     # pred: (batch_size, grid, grid, anchors, (x, y, w, h, obj, ...classes))
+    # anchors: (3,2)
     grid_size = tf.shape(pred)[1]
     box_xy, box_wh, objectness, class_probs = tf.split(
         pred, (2, 2, 1, classes), axis=-1)
 
+    # why not sigmoid box_wh?
     box_xy = tf.sigmoid(box_xy)
     objectness = tf.sigmoid(objectness)
     class_probs = tf.sigmoid(class_probs)
     pred_box = tf.concat((box_xy, box_wh), axis=-1)  # original xywh for loss
 
-    # !!! grid[x][y] == (y, x)
     grid = tf.meshgrid(tf.range(grid_size), tf.range(grid_size))
-    grid = tf.expand_dims(tf.stack(grid, axis=-1), axis=2)  # [gx, gy, 1, 2]
+    grid = tf.expand_dims(tf.stack(grid, axis=-1), axis=2)  # shape=(gy, gx, 1, 2)
+    # 对tf.stack函数的理解：把tensor数组合并成一个tensor，会增加一个纬度，在哪个位置增加纬度，由axis指定
+    # tf.stack的工作方式：先把tensor在axis指定的位置扩展一个纬度，然后对所有tensor在这个纬度上相加，stack后，
+    # 生成的tensor的shape是原tensor在axis位置增加一个大小是tensor数组的纬度
 
     box_xy = (box_xy + tf.cast(grid, tf.float32)) / \
         tf.cast(grid_size, tf.float32)
@@ -197,11 +206,19 @@ def yolo_nms(outputs, anchors, masks, classes):
 
 def YoloV3(size=None, channels=3, anchors=yolo_anchors,
            masks=yolo_anchor_masks, classes=80, training=False):
+    
+    # Input构建tensor的时候，会自动在前面补充一个None的batch纬度
     x = inputs = Input([size, size, channels])
 
+    # 建立几种尺寸的图层,[N, N, 3] => ([N/8, N/8, 256], [N/16, N/16, 512], [N/32, N/32, 1024])
+    # 在默认配置中，输入的图片尺寸是416*416，经过几次卷积之后，厚度最高的图的宽高为N/32*N/32，即13*13
+    # 在其它地方看到grid_size设置是13就是从这里来的
     x_36, x_61, x = Darknet(name='yolo_darknet')(x)
 
+    # 进行几次完整的卷积过程，w、h没有改变，c改变
     x = YoloConv(512, name='yolo_conv_0')(x)
+    # output shape: [batch,h,w,anchors,5+classes]
+    # (batch_size, grid, grid, anchors, (x, y, w, h, obj, ...classes))
     output_0 = YoloOutput(512, len(masks[0]), classes, name='yolo_output_0')(x)
 
     x = YoloConv(256, name='yolo_conv_1')((x, x_61))
@@ -275,6 +292,7 @@ def YoloLoss(anchors, classes=80, ignore_thresh=0.5):
         grid = tf.expand_dims(tf.stack(grid, axis=-1), axis=2)
         true_xy = true_xy * tf.cast(grid_size, tf.float32) - \
             tf.cast(grid, tf.float32)
+        # why use tf.math.log here? see yolo_boxes function
         true_wh = tf.math.log(true_wh / anchors)
         true_wh = tf.where(tf.math.is_inf(true_wh),
                            tf.zeros_like(true_wh), true_wh)

@@ -1,6 +1,7 @@
 # coding=utf-8
 import os
 import tensorflow as tf
+import numpy
 import json
 from PIL import Image, ImageDraw
 
@@ -58,7 +59,7 @@ def get_image_features(img_path, feature_path):
     return joined, shape, bboxes, labels_index, labels_text
 
 
-def pugb_train_data():
+def pubg_train_data():
     print('\n>> Begin converting')
     if len(PUBG_IMG_DIRS) > len(PUBG_IMG_LABELS):
         print("PUBG_IMG_DIRS and PUBG_IMG_LABELS have different size")
@@ -85,11 +86,21 @@ def pugb_train_data():
     return x_trains, y_trains
 
 
-def pugb_train_data_set():
-    x_trains, y_trains = pugb_train_data()
-    training_dataset = tf.data.Dataset.range(len(x_trains))
+def pubg_data_normalization(index, x_trains, y_trains):
+    y_item = y_trains[index]
+    return x_trains[index], y_item
+    return index, index
 
-    return
+
+def pubg_train_data_set():
+    x_trains, y_trains = pubg_train_data()
+    y_tensor = tf.convert_to_tensor(y_trains)
+    # training_data_set = tf.data.Dataset.range(len(x_trains)).\
+    #     map(lambda x: pubg_data_normalization(x.eval(session=tf.compat.v1.Session), x_trains, y_trains))
+
+    # training_data_set = tf.data.Dataset.from_tensor_slices([x_trains, y_trains])
+
+    return training_data_set
 
 
 # ############################### just for testing###########################################
@@ -121,6 +132,6 @@ def data_test(img_path, joined_features):
 
 if __name__ == '__main__':
     # init_classify_table()
-    pugb_train_data()
+    pubg_train_data_set()
 
 

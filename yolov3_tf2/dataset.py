@@ -7,6 +7,7 @@ def transform_targets_for_output(y_true, grid_size, anchor_idxs, classes):
     N = tf.shape(y_true)[0]
 
     # y_true_out: (N, grid, grid, anchors, [x, y, w, h, obj, class])
+    # y_true_out: (batch_size, grid_y, grid_x, anchors_index, [x1,y1,x2,y2,1,object])
     y_true_out = tf.zeros(
         (N, grid_size, grid_size, tf.shape(anchor_idxs)[0], 6))
 
@@ -24,21 +25,26 @@ def transform_targets_for_output(y_true, grid_size, anchor_idxs, classes):
 
             if tf.reduce_any(anchor_eq):
                 box = y_true[i][j][0:4]
+                # the center point
                 box_xy = (y_true[i][j][0:2] + y_true[i][j][2:4]) / 2
-
+                # anchor_idx =>(1,1)
                 anchor_idx = tf.cast(tf.where(anchor_eq), tf.int32)
+                # which grid does the center point of the box locate on
                 grid_xy = tf.cast(box_xy // (1/grid_size), tf.int32)
 
                 # grid[y][x][anchor] = (tx, ty, bw, bh, obj, class)
                 indexes = indexes.write(
+                    # [batch_id, grid_y, grid_x, anchor_id]
                     idx, [i, grid_xy[1], grid_xy[0], anchor_idx[0][0]])
                 updates = updates.write(
+                    # [x1, y1, x2, y2, 1, object_id]
                     idx, [box[0], box[1], box[2], box[3], 1, y_true[i][j][4]])
                 idx += 1
 
     # tf.print(indexes.stack())
     # tf.print(updates.stack())
-
+    # separate the picture into grids, fill grids info with boxes info
+    # y_true_out=> (batch, grid_y, grid_x, anchors_index, [x1,y1,x2,y2,1,object])
     return tf.tensor_scatter_nd_update(
         y_true_out, indexes.stack(), updates.stack())
 
@@ -49,19 +55,35 @@ def transform_targets(y_train, anchors, anchor_masks, classes):
 
     # calculate anchor index for true boxes
     anchors = tf.cast(anchors, tf.float32)
+    # anchor_area => [9]
     anchor_area = anchors[..., 0] * anchors[..., 1]
+    # box_wh => [1,8,2]
     box_wh = y_train[..., 2:4] - y_train[..., 0:2]
+    # box_wh => [1,8,1,2] => [1,8,9,2]
     box_wh = tf.tile(tf.expand_dims(box_wh, -2),
                      (1, 1, tf.shape(anchors)[0], 1))
+    # box_area => [1,8,9]
     box_area = box_wh[..., 0] * box_wh[..., 1]
+    #  not depend on coordinate, intersection=>[1,8,9]
     intersection = tf.minimum(box_wh[..., 0], anchors[..., 0]) * \
         tf.minimum(box_wh[..., 1], anchors[..., 1])
     iou = intersection / (box_area + anchor_area - intersection)
+    # which anchor best matches the item's shape, return the index of the anchor
+    # anchor_idx =>[1,8]
     anchor_idx = tf.cast(tf.argmax(iou, axis=-1), tf.float32)
+    # anchor_idx => [1,8,1]
     anchor_idx = tf.expand_dims(anchor_idx, axis=-1)
 
+    # y_train => [1,8,6] of [batch, items, (x1,y1,x2,y2,obj_index,anchor_index)]
     y_train = tf.concat([y_train, anchor_idx], axis=-1)
 
+    # grid_size is not the length of a grid edge, it is grid amount the picture's width and height is separated
+    # anchor masks 对anchors按3个一组（正、长、扁）进行划分。
+    # 图片的物体的大小与所有anchor进行匹配，根据最高重合度判断物品属于那个Anchors组
+    # 对图片进行网格划分，最大anchor面积的组网格数是grid_size*grid_size，第二大面积的组grid_size翻倍，类推
+    # 网格划分后，把物体信息填充到物体中心所在的网格数据里面
+    # 最终的结果：Anchor mask有多少组元素，tuple就有多少个元素，每个元素对应不同的Anchor规格
+    # 物品（box）数据只会落到tuple的其中一个元素里面，tuple原数据结构(batch,grid_size,grid_size,anchor_idx,[x1,y1,x2,y2,1,obj])
     for anchor_idxs in anchor_masks:
         y_outs.append(transform_targets_for_output(
             y_train, grid_size, anchor_idxs, classes))
